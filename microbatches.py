@@ -50,11 +50,9 @@ class Microbatch:
         self.global_rank = global_rank
         self.sent_work: dist.Work = None
         self.group = group
-        # print("global rank", global_rank)
+        
         self.rank = dist.get_group_rank(group, rank)
-        # print("group rank", self.rank)
 
-        # print("current rank", rank)
 
     def forward(self):
         print("sent microbatch")
@@ -98,18 +96,13 @@ class MicrobatchHead(Microbatch):
         self.microbatch_out: torch.Tensor = self.net.embed(self.microbatch)
         self.sent_work = dist.isend(self.microbatch_out.to("cpu"), self.global_rank+1, self.group)
 
-        # print("sent microbatch out to next rank", 1)
-        # print("microbatch out size", self.microbatch_out.size())
 
     def backward(self):
         inp_grad = torch.empty((self.microbatch_out.size(0), self.microbatch_out.size(1), dmodel))
         work = dist.irecv(inp_grad, self.global_rank+1, self.group)
         work.wait()
-        # super().backward()
         self.microbatch_out.backward(inp_grad.to(device))
 
-        # a= [param.grad for param in self.net.parameters() if param.grad is not None]
-        # print("net microbatch" ,len(a))
 class MicrobatchMiddle(Microbatch):
     """
     This class represents the handling of a microbatch in the middle stage of the pipeline. 
@@ -121,12 +114,9 @@ class MicrobatchMiddle(Microbatch):
 
     def forward(self):
         previous_l_out = torch.empty((self.microbatch.size(0), self.microbatch.size(1), dmodel))
-        # print("receiving microbatch from", self.rank-1)
-        # print("microbatch size", self.microbatch.size(), dmodel)
         work = dist.irecv(previous_l_out, self.global_rank-1, self.group)
         work.wait()
 
-        # print("received microbatch from", self.rank-1)
         with torch.no_grad():
             previous_l_out = previous_l_out.to(device)
             previous_l_out.requires_grad_()
@@ -135,16 +125,13 @@ class MicrobatchMiddle(Microbatch):
         self.microbatch_out = self.net(previous_l_out)
         self.prev_l_out = previous_l_out
         self.sent_work = dist.isend(self.microbatch_out.to("cpu"), self.global_rank+1, self.group)
-        # super().forward()
 
     def backward(self):
         grad_l_next = torch.empty((self.microbatch_out.size(0), self.microbatch_out.size(1), dmodel))
         work = dist.irecv(grad_l_next, self.global_rank+1, self.group)
         work.wait()
-        # super().backward()
         self.microbatch_out.backward(grad_l_next.to(device))
         self.sent_work = dist.isend(self.prev_l_out.grad.to("cpu"), self.global_rank-1, self.group)
-        # print("sent gradients")
 
 class MicrobatchTail(Microbatch):
     """"
@@ -154,13 +141,11 @@ class MicrobatchTail(Microbatch):
     """
     def __init__(self, global_rank:int, net: LLamaLastStage, microbatch: torch.Tensor, group: dist.ProcessGroup):
         super().__init__(global_rank, net, microbatch, group)
-        # self.net = cast(LLamaLastStage, net)
 
     def forward(self):
         prev_l_out = torch.empty((self.microbatch.size(0), self.microbatch.size(1), dmodel))
         work = dist.irecv(prev_l_out, self.global_rank-1, self.group)
         work.wait()
-        # print("received microbatch")
         with torch.no_grad():
             prev_l_out = prev_l_out.to(device)
             prev_l_out.requires_grad_()
@@ -173,13 +158,11 @@ class MicrobatchTail(Microbatch):
         logits = self.microbatch_out
         loss = causalLLMLoss(logits, target, tokenizer.vocab_size)
         self.loss = loss
-        # print(loss.item())
 
     
     def backward(self):
         self.loss.backward()
         self.sent_work = dist.isend(self.prev_l_out.grad.to("cpu"), self.global_rank-1, self.group)
-        # print("sent gradients")
 
 
 class PipelinePart:
@@ -224,13 +207,11 @@ class PipelinePart:
     def wait_all_sent(self):
         for microbatch in self.microbatches:
             microbatch.wait_sent()
-        # print("all sent")
     
     def scale_gradients(self):
         for param in self.net.parameters():
             if param.grad is not None:
                 param.grad = param.grad / self.world_size
-        # print("scaled gradients")
 
 
 class PipelineHead(PipelinePart):
@@ -261,15 +242,12 @@ class PipelineHead(PipelinePart):
         It splits the minibatch into microbatches, processes them and waits until all the microbatches are sent to ensure the forward 
         pass is done in this stage.
         """
-        # print("forward")
         out: torch.Tensor = next(self.iter_ds)
         out = out.to(device)
-        # print("got next batch")
         self.microbatches = [MicrobatchHead(self.global_rank, self.net, chunk, self.group) for chunk in out.chunk(self.world_size)]
         for microbatch in self.microbatches:
             microbatch.forward()
         self.wait_all_sent()
-        # print("head done")
 
 
     
@@ -277,18 +255,9 @@ class PipelineHead(PipelinePart):
         """
         The backward pass run at the first stage in the pipeline. It computes the gradients of the microbatches, cumulating them, and scales them.
         """
-        # grads = torch.empty((world_size, self.microbatch_size, self.seq_l, dmodel))
         for i, microbatch in enumerate(self.microbatches):
-            # microbatch.wait_sent()
             microbatch.backward()
-            
-            # a= [param.grad for param in self.net.parameters() if param.grad is not None]
-            # b= [param.grad for param in self.net.parameters() if param.grad is None]
-
-            # print("net pipeline" ,len(a))
-            # print("net pipeline no grad" ,len(b))
-            
-            # microbatch.microbatch_out.grad = microbatch.microbatch_out.grad / world_size
+    
             # as improvement delete unused memory (activations, microbatch)
         self.scale_gradients()  
 
@@ -311,7 +280,6 @@ class PipelineMiddle(PipelinePart):
         stages = self.world_size
         microbatch_size = self.batch_size // stages
         dummy_microbatch = torch.empty((microbatch_size, self.seq_l, dmodel)).to(device)
-        # print("dummy microbatch size", dummy_microbatch.size())
         self.microbatches = [MicrobatchMiddle(self.global_rank, self.net, dummy_microbatch, self.group) for _ in range(stages)]
         for microbatch in self.microbatches:
             microbatch.forward()
@@ -402,21 +370,18 @@ class ModelPipeline:
         Initializes the part of the pipeline the node is in charge of.
         """
         dist.barrier()
-        # print("group: ", dist.get_process_group_ranks(self.group))
         
         # we need to check the group's rank and not the global rank since the node is in a group and all the code runs 
         # in the context of the group
         group_rank = dist.get_group_rank(self.group, rank)
         group_world_size = dist.get_world_size(self.group)
 
-        # print("creating pipeline")
         if group_rank == 0:
                 self.part = PipelineHead(rank, self.group, batch_size, seq_l)
         elif group_rank == group_world_size - 1:
             self.part = PipelineTail(rank, self.group, batch_size, seq_l)
         else:
             self.part = PipelineMiddle(rank, self.group, batch_size, seq_l)
-        # print("pipeline created")
                 
     def start(self):
         """
@@ -466,7 +431,6 @@ class DataParallelPipeline(ModelPipeline):
         # create the list groups, each group representing a pipeline
         self.groups = [dist.new_group(group_ranks) for group_ranks in horizontal_group_ranks]
         self.group = self.groups[self.rank // self.parts_per_pipeline]
-        # print("group created", dist.get_process_group_ranks(self.group))
 
 
     def _init_part(self, rank: int):
@@ -481,12 +445,10 @@ class DataParallelPipeline(ModelPipeline):
         pipelines_ranks = torch.tensor(pipelines_ranks)
         vertical_groups:list[dist.ProcessGroup] = []
         
-        # print("vertical group ranks", a)
         for i in range(pipelines_ranks.size(1)):
             vertical_groups.append(dist.new_group(pipelines_ranks[:,i].tolist()))
         self.vertical_groups = vertical_groups
         self.vertical_group = self.vertical_groups[int(rank % self.parts_per_pipeline)]
-        # print("vertical group created", dist.get_process_group_ranks(self.vertical_group))
 
 
     def _init_weight_sizes(self):
@@ -505,7 +467,6 @@ class DataParallelPipeline(ModelPipeline):
 
             # waits for all the gradients to be computed before aggregating all the pipelines gradients
             dist.barrier()
-            # print("aggregating gradients")
             self.aggregate_gradients()
             self.optim.step()
             self.part.clean_up_memory()
@@ -523,8 +484,6 @@ class DataParallelPipeline(ModelPipeline):
             tmp.append(param.grad.view(-1).to("cpu"))
             param.grad = None
         prev_grad = torch.cat(tmp).to("cpu")
-        # print("reducing gradients")
-        # print("prev grad size", prev_grad.size())
         dist.all_reduce(prev_grad, op = dist.ReduceOp.SUM, group=self.vertical_group)
         tmp = torch.split(prev_grad, self.len_sizes)
         for i, param in enumerate(self.part.net.parameters()):
