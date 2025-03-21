@@ -1,8 +1,11 @@
 #!/bin/bash
 cd "$(dirname "$0")" || return
 START_TIME=$SECONDS
+
 # activate current .venv environment
-source ../../.venv/bin/activate
+conda init zsh
+source ~/.zshrc
+conda activate JDMP
 
 for ((i=0; i<3; i=i+1))
 do

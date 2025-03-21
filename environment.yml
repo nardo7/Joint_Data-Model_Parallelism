@@ -1,0 +1,11 @@
+name: JDMP
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12.2
+  - pip
+  - ipykernel
+  # add requirements.txt
+  - pip:
+      - -r requirements.txt
